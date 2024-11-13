@@ -17,43 +17,47 @@ import pickle
 import h5py
 import progressbar
 from time import sleep
+import glob
 
-parameters = pd.read_csv('data_preparation/parameters.csv', index_col=['parameter'])
-seizure_type_data = collections.namedtuple('seizure_type_data', ['patient_id','seizure_type', 'data'])
+parameters = pd.read_csv('/home/ebocini/repos/seizure-type-classification-tuh-data-preparation-update/data_preparation/parameters.csv', index_col=['parameter'])
+seizure_type_data = collections.namedtuple('seizure_type_data', ['segment_id','seizure_type', 'data'])
 
-def generate_data_dict(xlsx_file_name,sheet_name, tuh_eeg_szr_ver):
+def generate_data_dict(xlsx_file_name, sheet_name):
 
-    seizure_info = collections.namedtuple('seizure_info', ['patient_id','filename', 'start_time', 'end_time'])
+    """
+    Generate a data dictionary from an Excel file containing seizure information.
+
+    Args:
+        xlsx_file_name (str): Path to the Excel file with seizure annotations.
+        sheet_name (str): The sheet name within the Excel file to read.
+
+    Returns:
+        data_dict (dict): A dictionary with seizure types as keys and lists of seizure_info namedtuples as values.
+    """
+    seizure_info = collections.namedtuple('seizure_info', ['segment_id','start_time', 'end_time', 'label', 'confidence', 'data_type'])
     data_dict = collections.defaultdict(list)
 
-    excel_file = os.path.join(xlsx_file_name)
-    data = pd.read_excel(excel_file, sheet_name=sheet_name)
-    if tuh_eeg_szr_ver == 'v1.5.2':
-        data = data.iloc[1:]# remove first row
-    elif tuh_eeg_szr_ver == 'v1.4.0':
-        data = data.iloc[1:-4]  # remove first and last 4 rows
-    else:
-        exit('tuh_eeg_szr_ver %s is not supported'%tuh_eeg_szr_ver)
+    data_type = xlsx_file_name.split('/')[-2]  # Assumes the second last element in the path is 'train', 'dev', or 'eval'
 
-    col_l_file_name = data.columns[11]
-    col_m_start = data.columns[12]
-    col_n_stop = data.columns[13]
-    col_o_szr_type = data.columns[14]
-    train_files = data[[col_l_file_name, col_m_start,col_n_stop,col_o_szr_type]]
-    train_files = np.array(train_files.dropna())
+     # Load the Excel file
+    xls = pd.ExcelFile(xlsx_file_name)
+    
+    for sheet_name in xls.sheet_names:
+        # print(f"Processing sheet: {sheet_name}")
+        # Read the Excel sheet
+        data = pd.read_excel(xls, sheet_name=sheet_name)
+        # print(f"Columns in the sheet: {data.columns.tolist()}")
 
-    for item in train_files:
-        a = item[0].split('/')
-        if tuh_eeg_szr_ver == 'v1.5.2':
-            patient_id = a[4]
-        elif tuh_eeg_szr_ver == 'v1.4.0':
-            patient_id = a[5]
-        else:
-            exit('tuh_eeg_szr_ver %s is not supported' % tuh_eeg_szr_ver)
+        # Assuming the columns in the Excel file are consistent with what the function originally expected
+        for index, row in data.iterrows():
+            segment_id = sheet_name  # Using the sheet name as the segment identifier
+            start_time = row['start_time']
+            end_time = row['stop_time']
+            label = row['label']
+            confidence = row['confidence']
 
-        v = seizure_info(patient_id = patient_id, filename = item[0], start_time=item[1], end_time=item[2])
-        k = item[3] #szr_type
-        data_dict[k].append(v)
+            v = seizure_info(segment_id=segment_id, start_time=start_time, end_time=end_time, label=label, confidence=confidence, data_type=data_type)
+            data_dict[label].append(v)
 
     return data_dict
 
@@ -62,7 +66,7 @@ def print_type_information(data_dict):
     l = []
     for szr_type, szr_info_list in data_dict.items():
         # how many different patient id for seizure K?
-        patient_id_list = [szr_info.patient_id for szr_info in szr_info_list]
+        patient_id_list = [szr_info.segment_id for szr_info in szr_info_list]
         unique_patient_id_list,counts = np.unique(patient_id_list,return_counts=True)
 
         dur_list = [szr_info.end_time-szr_info.start_time for szr_info in szr_info_list]
@@ -163,120 +167,128 @@ def load_edf_extract_seizures_v140(base_dir, save_data_dir, data_dict):
     return seizure_data_dict
 
 
-def load_edf_extract_seizures_v152(base_dir, save_data_dir, data_dict):
-
+def load_edf_extract_seizures_v203(base_dir, save_data_dir, data_dict):
     seizure_data_dict = collections.defaultdict(list)
-
-
     count = 0
     bar = progressbar.ProgressBar(maxval=sum(len(v) for k, v in data_dict.items()),
                                   widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])
     bar.start()
+
     for seizure_type, seizures in data_dict.items():
         for seizure in seizures:
-            rel_file_location = seizure.filename.replace('.tse', '.edf').replace('./', 'edf/')
-            patient_id = seizure.patient_id
-            abs_file_location = os.path.join(base_dir, rel_file_location)
+            # Construct the search pattern based on the segment_id
+            parts = seizure.segment_id.split('_')
+            patient_id_idx = 3
+            patient_id = parts[patient_id_idx]
+            if len(patient_id) < 8:
+                patient_id_idx += 1
+                patient_id = parts[patient_id_idx]
+            session = parts[patient_id_idx+1]
+            segment = parts[patient_id_idx+2]
+            data_type = seizure.data_type  # Ensure this is correctly populated from your data structure
+
+            # Construct the search pattern to find the .edf file
+            search_pattern = os.path.join(base_dir, data_type, patient_id, f'{session}*', '**', f'{patient_id}_{session}_{segment}.edf')
+            edf_files = glob.glob(search_pattern, recursive=True)
+
+            if not edf_files:
+                import pdb; pdb.set_trace()
+                print(f"No .edf file found for pattern: {search_pattern}")
+                continue
+
+            edf_file_path = edf_files[0]  # Assume the first match is correct
+
             try:
-                temp = seizure_type_data(patient_id = patient_id, seizure_type = seizure_type, data = read_edfs_and_extract(abs_file_location, seizure.start_time, seizure.end_time))
-                with open(os.path.join(save_data_dir, 'szr_' + str(count) + '_pid_' + patient_id + '_type_' + seizure_type + '.pkl'), 'wb') as fseiz:
+                data = read_edfs_and_extract(edf_file_path, seizure.start_time, seizure.end_time)
+                temp = seizure_type_data(segment_id=seizure.segment_id, seizure_type=seizure_type, data=data)
+                
+                output_file_path = os.path.join(save_data_dir, f'szr_{count}_{seizure.segment_id}_{seizure_type}.pkl')
+                with open(output_file_path, 'wb') as fseiz:
                     pickle.dump(temp, fseiz)
+                
                 count += 1
             except Exception as e:
                 print(e)
-                print(rel_file_location)
+                print(f"Error processing file: {edf_file_path}")
 
             bar.update(count)
-    bar.finish()
 
+    bar.finish()
     return seizure_data_dict
 
+
 # to convert raw edf data into pkl format raw data
-def gen_raw_seizure_pkl(args,tuh_eeg_szr_ver, anno_file):
+def gen_raw_seizure_pkl(args,tuh_eeg_szr_ver):
     base_dir = args.base_dir
 
     save_data_dir = os.path.join(args.save_data_dir, tuh_eeg_szr_ver, 'raw_seizures')
     if not os.path.exists(save_data_dir):
         os.makedirs(save_data_dir)
 
-    raw_data_base_dir = os.path.join(base_dir, tuh_eeg_szr_ver)
-    szr_annotation_file = os.path.join(raw_data_base_dir, '_DOCS', anno_file)
+    #raw_data_base_dir = os.path.join(base_dir, tuh_eeg_szr_ver)
+    #szr_annotation_file = os.path.join(raw_data_base_dir, '_DOCS', anno_file)
+    # Define the path to the combined Excel files
+    train_xlsx_file = os.path.join(base_dir, 'train', 'train_combined_data.xlsx')
+    eval_xlsx_file = os.path.join(base_dir, 'eval', 'eval_combined_data.xlsx')
+    dev_xlsx_file = os.path.join(base_dir, 'dev', 'dev_combined_data.xlsx') 
 
     # For training files
     print('Parsing the seizures of the training set...\n')
-    train_data_dict = generate_data_dict(szr_annotation_file, 'train', tuh_eeg_szr_ver)
+    train_data_dict = generate_data_dict(train_xlsx_file, 'train')
     print('Number of seizures by type in the training set...\n')
     print_type_information(train_data_dict)
     print('\n\n')
 
     # For dev files
-    if tuh_eeg_szr_ver == 'v1.5.2':
-        dev_name = 'dev'
-    elif tuh_eeg_szr_ver == 'v1.4.0':
-        dev_name = 'dev_test'
-    else:
-        exit('tuh_eeg_szr_ver %s is not supported' % tuh_eeg_szr_ver)
+    print('Parsing the seizures of the dev set...\n')
+    dev_data_dict = generate_data_dict(dev_xlsx_file, 'dev')
+    print_type_information(dev_data_dict)
 
-    print('Parsing the seizures of the validation set...\n')
-    dev_test_data_dict = generate_data_dict(szr_annotation_file, dev_name, tuh_eeg_szr_ver)
-    print('Number of seizures by type in the validation set...\n')
-    print_type_information(dev_test_data_dict)
+
+     # For eval files
+    print('Parsing the seizures of the eval set...\n')
+    eval_data_dict = generate_data_dict(eval_xlsx_file, 'eval')
+    print_type_information(eval_data_dict)
     print('\n\n')
 
     # Now we combine both
     print('Combining the training and validation set...\n')
-    merged_dict = merge_train_test(dev_test_data_dict, train_data_dict)
+    merged_dict = merge_train_test(dev_data_dict, train_data_dict)
     # merged_dict = merge_train_test(train_data_dict,dev_test_data_dict)
     print('Number of seizures by type in the combined set...\n')
     print_type_information(merged_dict)
     print('\n\n')
 
-    # Extract the seizures from the edf files and save them
-    if tuh_eeg_szr_ver == 'v1.5.2':
-        seizure_data_dict = load_edf_extract_seizures_v152(raw_data_base_dir, save_data_dir, merged_dict)
-    elif tuh_eeg_szr_ver == 'v1.4.0':
-        seizure_data_dict = load_edf_extract_seizures_v140(raw_data_base_dir, save_data_dir, merged_dict)
+    # Process and extract the seizures from the EDF files
+    if tuh_eeg_szr_ver == 'v2.0.3':
+        print('Processing v2.0.3 data for combined training and dev datasets...\n')
+        seizure_data_dict = load_edf_extract_seizures_v203(base_dir, save_data_dir, merged_dict)
+        print_type_information(seizure_data_dict)
     else:
-        exit('tuh_eeg_szr_ver %s is not supported' % tuh_eeg_szr_ver)
-
-    print_type_information(seizure_data_dict)
+        exit(f'Unsupported version {tuh_eeg_szr_ver}')
     print('\n\n')
 
 
 def main():
     parser = argparse.ArgumentParser(description='Build data for TUH EEG data')
 
-    if platform.system() == 'Linux':
-        parser.add_argument('--base_dir', default='/slow1/raw_datasets/tuh/tuh_eeg_seizure/',
-                            help='path to raw seizure dataset')
-        parser.add_argument('--save_data_dir', default='/slow1/out_datasets/tuh/seizure_type_classification/',
-                            help='path to save processed data')
-    elif platform.system() == 'Darwin':
-        parser.add_argument('--base_dir', default='/Users/jbtang/datasets/TUH/eeg_seizure/',
-                            help='path to raw seizure dataset')
-        parser.add_argument('--save_data_dir',
-                            default='/Users/jbtang/datasets/TUH/output/seizures_type_classification/',
-                            help='path to save processed data')
-    else:
-        print('Unknown OS platform %s' % platform.system())
-        exit()
+    # Set default base directory based on the operating system
+    default_base_dir = '/home/ebocini/repos/tuh-seizure-data'
+    default_save_dir = '/home/ebocini/repos/tuh-seizure-data/processed_data'
 
-    parser.add_argument('-v', '--tuh_eeg_szr_ver',
-                        default='v1.5.2',
-                        #default='v1.4.0',
-                        help='version of TUH seizure dataset')
+    parser.add_argument('--base_dir', default=default_base_dir, help='path to raw seizure dataset')
+    parser.add_argument('--save_data_dir', default=default_save_dir, help='path to save processed data')
+    parser.add_argument('--tuh_eeg_szr_ver', choices=['v1.4.0', 'v1.5.2', 'v2.0.3'], default='v2.0.3', help='version of TUH seizure dataset')
 
     args = parser.parse_args()
-    tuh_eeg_szr_ver = args.tuh_eeg_szr_ver
 
-    if tuh_eeg_szr_ver == 'v1.4.0': # for v1.4.0
-        anno_file = 'seizures_v31r.xlsx'
-        gen_raw_seizure_pkl(args, tuh_eeg_szr_ver, anno_file)
-    elif tuh_eeg_szr_ver == 'v1.5.2': # for v1.5.2
-        anno_file = 'seizures_v36r.xlsx'
-        gen_raw_seizure_pkl(args, tuh_eeg_szr_ver, anno_file)
-    else:
-        exit('Not supported version number %s'%tuh_eeg_szr_ver)
+    # Define the Excel file paths based on the provided base directory
+    train_xlsx_file = os.path.join(args.base_dir, 'train', 'train_combined_data.xlsx')
+    eval_xlsx_file = os.path.join(args.base_dir, 'eval', 'eval_combined_data.xlsx')
+
+    # Call the function to process the raw seizure data
+    gen_raw_seizure_pkl(args, args.tuh_eeg_szr_ver)
+
 
 if __name__ == '__main__':
     main()

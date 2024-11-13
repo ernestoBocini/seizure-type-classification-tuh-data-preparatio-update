@@ -14,7 +14,7 @@ import numpy as np
 from joblib import Parallel, delayed
 import warnings
 
-seizure_type_data = collections.namedtuple('seizure_type_data', ['patient_id','seizure_type', 'data'])
+seizure_type_data = collections.namedtuple('seizure_type_data', ['segment_id','seizure_type', 'data'])
 
 def convert_to_fft(window_length, window_step, fft_min_freq, fft_max_freq, sampling_frequency, file_path):
 
@@ -33,7 +33,7 @@ def convert_to_fft(window_length, window_step, fft_min_freq, fft_max_freq, sampl
         start, stop = start + step, stop + step
 
     fft_data = np.array(fft_data)
-    named_data = seizure_type_data(patient_id=type_data.patient_id, seizure_type=type_data.seizure_type, data=fft_data)
+    named_data = seizure_type_data(segment_id=type_data.segment_id, seizure_type=type_data.seizure_type, data=fft_data)
 
     return named_data,os.path.basename(file_path)
 
